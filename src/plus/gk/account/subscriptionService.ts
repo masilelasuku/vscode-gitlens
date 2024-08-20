@@ -27,6 +27,7 @@ import { Commands, urls } from '../../../constants';
 import type { Container } from '../../../container';
 import { AccountValidationError } from '../../../errors';
 import type { RepositoriesChangeEvent } from '../../../git/gitProviderService';
+import { showIntegrationDisconnectedTooManyFailedRequestsWarningMessage } from '../../../messages';
 import { executeCommand, registerCommand } from '../../../system/command';
 import { configuration } from '../../../system/configuration';
 import { setContext } from '../../../system/context';
@@ -436,6 +437,7 @@ export class SubscriptionService implements Disposable {
 	}
 
 	private async logoutCore(reset: boolean = false): Promise<void> {
+		this.resetRequestExceptionCount();
 		this._lastValidatedDate = undefined;
 		if (this._validationTimer != null) {
 			clearInterval(this._validationTimer);
@@ -484,6 +486,21 @@ export class SubscriptionService implements Disposable {
 			account: undefined,
 			activeOrganization: undefined,
 		});
+	}
+
+	private requestExceptionCount = 0;
+
+	resetRequestExceptionCount(): void {
+		this.requestExceptionCount = 0;
+	}
+
+	trackRequestException(): void {
+		this.requestExceptionCount++;
+
+		if (this.requestExceptionCount >= 5 && this.getAuthenticationSession() !== null) {
+			void showIntegrationDisconnectedTooManyFailedRequestsWarningMessage('GitKraken');
+			void this.logout(undefined, undefined);
+		}
 	}
 
 	@log()
@@ -1010,6 +1027,7 @@ export class SubscriptionService implements Disposable {
 		}
 
 		const session = await this._sessionPromise;
+		this.resetRequestExceptionCount();
 		return session ?? undefined;
 	}
 

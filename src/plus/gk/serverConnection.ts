@@ -1,12 +1,15 @@
+import type { RequestError } from '@octokit/request-error';
 import type { CancellationToken, Disposable } from 'vscode';
-import { version as codeVersion, env, Uri } from 'vscode';
+import { version as codeVersion, env, Uri, window } from 'vscode';
 import type { HeadersInit, RequestInfo, RequestInit, Response } from '@env/fetch';
 import { fetch as _fetch, getProxyAgent } from '@env/fetch';
 import { getPlatform } from '@env/platform';
 import type { Container } from '../../container';
-import { AuthenticationRequiredError, CancellationError } from '../../errors';
+import { AuthenticationError, AuthenticationErrorReason, AuthenticationRequiredError, CancellationError, ProviderRequestClientError, ProviderRequestNotFoundError } from '../../errors';
+import { showIntegrationDisconnectedTooManyFailedRequestsWarningMessage, showIntegrationRequestFailed500WarningMessage } from '../../messages';
 import { memoize } from '../../system/decorators/memoize';
 import { Logger } from '../../system/logger';
+import type { LogScope } from '../../system/logger.scope';
 import { getLogScope } from '../../system/logger.scope';
 
 interface FetchOptions {
@@ -171,7 +174,7 @@ export class ServerConnection implements Disposable {
 			}
 			// TODO@eamodio handle common response errors
 
-			return this.fetch(
+			const result = await this.fetch(
 				url,
 				{
 					...init,
@@ -179,10 +182,61 @@ export class ServerConnection implements Disposable {
 				},
 				options,
 			);
+			this.container.subscription.resetRequestExceptionCount();
+			return result;
 		} catch (ex) {
-			Logger.error(ex, scope);
+			this.handleRequestError(ex, scope);
 			throw ex;
 		}
+	}
+
+	private handleRequestError(
+		ex: RequestError | (Error & { name: 'AbortError' }),
+		scope: LogScope | undefined,
+	): void {
+		if (ex instanceof CancellationError) throw ex;
+		if (ex.name === 'AbortError') throw new CancellationError(ex);
+
+		switch (ex.status) {
+			case 404: // Not found
+			case 410: // Gone
+			case 422: // Unprocessable Entity
+				throw new ProviderRequestNotFoundError(ex);
+			// case 429: //Too Many Requests
+			case 401: // Unauthorized
+				throw new AuthenticationError('gitkraken', AuthenticationErrorReason.Unauthorized, ex);
+			case 403: // Forbidden
+				throw new AuthenticationError('gitkraken', AuthenticationErrorReason.Forbidden, ex);
+			case 500: // Internal Server Error
+				Logger.error(ex, scope);
+				if (ex.response != null) {
+					this.container.subscription.trackRequestException();
+					void showIntegrationRequestFailed500WarningMessage(
+						`GitKraken failed to respond and might be experiencing issues. Please visit the [GitKraken status page](https://cloud.gitkrakenstatus.com/) for more information.`
+					);
+				}
+				return;
+			case 502: // Bad Gateway
+				Logger.error(ex, scope);
+				break;
+			case 503: // Service Unavailable
+				Logger.error(ex, scope);
+				this.container.subscription.trackRequestException();
+				void showIntegrationRequestFailed500WarningMessage(
+					`GitKraken failed to respond and might be experiencing issues. Please visit the [GitKraken status page](https://cloud.gitkrakenstatus.com/) for more information.`,
+				);
+				return;
+			default:
+				if (ex.status >= 400 && ex.status < 500) throw new ProviderRequestClientError(ex);
+				break;
+		}
+
+		if (Logger.isDebugging) {
+			void window.showErrorMessage(
+				`GitKraken request failed: ${(ex.response as any)?.errors?.[0]?.message ?? ex.message}`,
+			);
+		}
+
 	}
 
 	private async getAccessToken() {
