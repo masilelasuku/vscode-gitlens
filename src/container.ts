@@ -25,6 +25,7 @@ import { FocusProvider } from './plus/focus/focusProvider';
 import { AccountAuthenticationProvider } from './plus/gk/account/authenticationProvider';
 import { OrganizationService } from './plus/gk/account/organizationService';
 import { SubscriptionService } from './plus/gk/account/subscriptionService';
+import { FetchingService } from './plus/gk/fetchingService';
 import { ServerConnection } from './plus/gk/serverConnection';
 import type { CloudIntegrationService } from './plus/integrations/authentication/cloudIntegrationService';
 import { IntegrationAuthenticationService } from './plus/integrations/authentication/integrationAuthentication';
@@ -189,6 +190,7 @@ export class Container {
 		},
 	};
 
+	private readonly _fetchingService: FetchingService;
 	private readonly _connection: ServerConnection;
 	private _disposables: Disposable[];
 	private _terminalLinks: GitTerminalLinkProvider | undefined;
@@ -214,7 +216,8 @@ export class Container {
 			configuration.onDidChangeAny(this.onAnyConfigurationChanged, this),
 		];
 
-		this._disposables.push((this._connection = new ServerConnection(this)));
+		this._disposables.push((this._fetchingService = new FetchingService(this)));
+		this._disposables.push((this._connection = new ServerConnection(this, this._fetchingService)));
 
 		this._disposables.push(
 			(this._accountAuthentication = new AccountAuthenticationProvider(this, this._connection)),
@@ -464,7 +467,7 @@ export class Container {
 	private _drafts: DraftService | undefined;
 	get drafts() {
 		if (this._drafts == null) {
-			this._disposables.push((this._drafts = new DraftService(this, this._connection)));
+			this._disposables.push((this._drafts = new DraftService(this, this._connection, this._fetchingService)));
 		}
 		return this._drafts;
 	}
@@ -525,7 +528,9 @@ export class Container {
 	private _enrichments: EnrichmentService | undefined;
 	get enrichments() {
 		if (this._enrichments == null) {
-			this._disposables.push((this._enrichments = new EnrichmentService(this, new ServerConnection(this))));
+			this._disposables.push(
+				(this._enrichments = new EnrichmentService(this, new ServerConnection(this, this._fetchingService))),
+			);
 		}
 
 		return this._enrichments;

@@ -1,21 +1,13 @@
-import type { RequestError } from '@octokit/request-error';
-import type { CancellationToken, Disposable } from 'vscode';
-import { version as codeVersion, env, Uri, window } from 'vscode';
+import type { Disposable } from 'vscode';
+import { Uri } from 'vscode';
 import type { HeadersInit, RequestInfo, RequestInit, Response } from '@env/fetch';
-import { fetch as _fetch, getProxyAgent } from '@env/fetch';
-import { getPlatform } from '@env/platform';
 import type { Container } from '../../container';
-import { AuthenticationError, AuthenticationErrorReason, AuthenticationRequiredError, CancellationError, ProviderRequestClientError, ProviderRequestNotFoundError } from '../../errors';
-import { showIntegrationDisconnectedTooManyFailedRequestsWarningMessage, showIntegrationRequestFailed500WarningMessage } from '../../messages';
+import { AuthenticationRequiredError } from '../../errors';
 import { memoize } from '../../system/decorators/memoize';
 import { Logger } from '../../system/logger';
-import type { LogScope } from '../../system/logger.scope';
 import { getLogScope } from '../../system/logger.scope';
-
-interface FetchOptions {
-	cancellation?: CancellationToken;
-	timeout?: number;
-}
+import type { SubscriptionService } from './account/subscriptionService';
+import type { FetchingService, FetchOptions, Retriever } from './fetchingService';
 
 interface GKFetchOptions extends FetchOptions {
 	token?: string;
@@ -24,8 +16,30 @@ interface GKFetchOptions extends FetchOptions {
 	organizationId?: string | false;
 }
 
+class GKRetriever implements Retriever {
+	id = 'gitkraken';
+	name = 'GitKraken';
+	statusPageUrl = 'https://cloud.gitkrakenstatus.com/';
+
+	constructor(
+		public token: string | undefined,
+		private subscriptionService: SubscriptionService,
+	) {}
+
+	trackRequestException(): void {
+		this.subscriptionService.trackRequestException();
+	}
+
+	resetRequestExceptionCount(): void {
+		this.subscriptionService.resetRequestExceptionCount();
+	}
+}
+
 export class ServerConnection implements Disposable {
-	constructor(private readonly container: Container) {}
+	constructor(
+		private readonly container: Container,
+		private readonly connection: FetchingService,
+	) {}
 
 	dispose() {}
 
@@ -64,57 +78,12 @@ export class ServerConnection implements Disposable {
 	}
 
 	@memoize()
-	get userAgent(): string {
-		// TODO@eamodio figure out standardized format/structure for our user agents
-		return `${this.container.debugging ? 'GitLens-Debug' : this.container.prerelease ? 'GitLens-Pre' : 'GitLens'}/${
-			this.container.version
-		} (${env.appName}/${codeVersion}; ${getPlatform()})`;
-	}
-
-	@memoize()
 	get clientName(): string {
 		return this.container.debugging
 			? 'gitlens-vsc-debug'
 			: this.container.prerelease
 			  ? 'gitlens-vsc-pre'
 			  : 'gitlens-vsc';
-	}
-
-	async fetch(url: RequestInfo, init?: RequestInit, options?: FetchOptions): Promise<Response> {
-		const scope = getLogScope();
-
-		if (options?.cancellation?.isCancellationRequested) throw new CancellationError();
-
-		const aborter = new AbortController();
-
-		let timeout;
-		if (options?.cancellation != null) {
-			timeout = options.timeout; // Don't set a default timeout if we have a cancellation token
-			options.cancellation.onCancellationRequested(() => aborter.abort());
-		} else {
-			timeout = options?.timeout ?? 60 * 1000;
-		}
-
-		const timer = timeout != null ? setTimeout(() => aborter.abort(), timeout) : undefined;
-
-		try {
-			const promise = _fetch(url, {
-				agent: getProxyAgent(),
-				...init,
-				headers: {
-					'User-Agent': this.userAgent,
-					...init?.headers,
-				},
-				signal: aborter?.signal,
-			});
-			void promise.finally(() => clearTimeout(timer));
-			return await promise;
-		} catch (ex) {
-			Logger.error(ex, scope);
-			if (ex.name === 'AbortError') throw new CancellationError(ex);
-
-			throw ex;
-		}
 	}
 
 	async fetchApi(path: string, init?: RequestInit, options?: GKFetchOptions): Promise<Response> {
@@ -174,7 +143,8 @@ export class ServerConnection implements Disposable {
 			}
 			// TODO@eamodio handle common response errors
 
-			const result = await this.fetch(
+			return this.connection.fetch(
+				new GKRetriever(token, this.container.subscription),
 				url,
 				{
 					...init,
@@ -182,61 +152,10 @@ export class ServerConnection implements Disposable {
 				},
 				options,
 			);
-			this.container.subscription.resetRequestExceptionCount();
-			return result;
 		} catch (ex) {
-			this.handleRequestError(ex, scope);
+			Logger.error(ex, scope);
 			throw ex;
 		}
-	}
-
-	private handleRequestError(
-		ex: RequestError | (Error & { name: 'AbortError' }),
-		scope: LogScope | undefined,
-	): void {
-		if (ex instanceof CancellationError) throw ex;
-		if (ex.name === 'AbortError') throw new CancellationError(ex);
-
-		switch (ex.status) {
-			case 404: // Not found
-			case 410: // Gone
-			case 422: // Unprocessable Entity
-				throw new ProviderRequestNotFoundError(ex);
-			// case 429: //Too Many Requests
-			case 401: // Unauthorized
-				throw new AuthenticationError('gitkraken', AuthenticationErrorReason.Unauthorized, ex);
-			case 403: // Forbidden
-				throw new AuthenticationError('gitkraken', AuthenticationErrorReason.Forbidden, ex);
-			case 500: // Internal Server Error
-				Logger.error(ex, scope);
-				if (ex.response != null) {
-					this.container.subscription.trackRequestException();
-					void showIntegrationRequestFailed500WarningMessage(
-						`GitKraken failed to respond and might be experiencing issues. Please visit the [GitKraken status page](https://cloud.gitkrakenstatus.com/) for more information.`
-					);
-				}
-				return;
-			case 502: // Bad Gateway
-				Logger.error(ex, scope);
-				break;
-			case 503: // Service Unavailable
-				Logger.error(ex, scope);
-				this.container.subscription.trackRequestException();
-				void showIntegrationRequestFailed500WarningMessage(
-					`GitKraken failed to respond and might be experiencing issues. Please visit the [GitKraken status page](https://cloud.gitkrakenstatus.com/) for more information.`,
-				);
-				return;
-			default:
-				if (ex.status >= 400 && ex.status < 500) throw new ProviderRequestClientError(ex);
-				break;
-		}
-
-		if (Logger.isDebugging) {
-			void window.showErrorMessage(
-				`GitKraken request failed: ${(ex.response as any)?.errors?.[0]?.message ?? ex.message}`,
-			);
-		}
-
 	}
 
 	private async getAccessToken() {

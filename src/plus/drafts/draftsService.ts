@@ -46,6 +46,7 @@ import { getSettledValue } from '../../system/promise';
 import type { FocusItem } from '../focus/focusProvider';
 import type { OrganizationMember } from '../gk/account/organization';
 import type { SubscriptionAccount } from '../gk/account/subscription';
+import type { FetchingService, Retriever } from '../gk/fetchingService';
 import type { ServerConnection } from '../gk/serverConnection';
 import type { IntegrationId } from '../integrations/providers/models';
 import { providersMetadata } from '../integrations/providers/models';
@@ -56,10 +57,20 @@ export interface ProviderAuth {
 	token: string;
 }
 
+class DraftsRetriever implements Retriever {
+	id = 'drafts';
+	name = 'Drafts Service';
+	trackRequestException(): void {}
+	resetRequestExceptionCount(): void {}
+}
+
 export class DraftService implements Disposable {
+	private readonly retriever = new DraftsRetriever();
+
 	constructor(
 		private readonly container: Container,
 		private readonly connection: ServerConnection,
+		private readonly fetchingService: FetchingService,
 	) {}
 
 	dispose(): void {}
@@ -180,7 +191,7 @@ export class DraftService implements Disposable {
 				const files = diffFiles?.files.map(f => ({ ...f, gkRepositoryId: patch.gitRepositoryId })) ?? [];
 
 				// Upload patch to returned S3 url
-				await this.connection.fetch(url, {
+				await this.fetchingService.fetch(this.retriever, url, {
 					method: method,
 					headers: {
 						'Content-Type': 'text/plain',
@@ -592,7 +603,7 @@ export class DraftService implements Disposable {
 		const { url, method, headers } = secureLink;
 
 		// Download patch from returned S3 url
-		const contentsRsp = await this.connection.fetch(url, {
+		const contentsRsp = await this.fetchingService.fetch(this.retriever, url, {
 			method: method,
 			headers: {
 				Accept: 'text/plain',
