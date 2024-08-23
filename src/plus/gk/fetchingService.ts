@@ -11,8 +11,10 @@ import {
 	AuthenticationErrorReason,
 	CancellationError,
 	ProviderRequestClientError,
+	ProviderRequestGoneError,
 	ProviderRequestNotFoundError,
 	ProviderRequestRateLimitError,
+	ProviderRequestUnprocessableEntityError,
 } from '../../errors';
 import {
 	showIntegrationRequestFailed500WarningMessage,
@@ -88,6 +90,19 @@ export class FetchingService implements Disposable {
 		}
 	}
 
+	private buildProviderRequestRateLimitError(provider: Retriever, ex: RequestError) {
+		let resetAt: number | undefined;
+
+		const reset = ex.response?.headers?.['x-ratelimit-reset'];
+		if (reset != null) {
+			resetAt = parseInt(reset, 10);
+			if (Number.isNaN(resetAt)) {
+				resetAt = undefined;
+			}
+		}
+		return new ProviderRequestRateLimitError(ex, provider.token, resetAt);
+	}
+
 	private handleRequestError(
 		provider: Retriever,
 		ex: RequestError | (Error & { name: 'AbortError' }),
@@ -98,25 +113,18 @@ export class FetchingService implements Disposable {
 
 		switch (ex.status) {
 			case 404: // Not found
-			case 410: // Gone
-			case 422: // Unprocessable Entity
 				throw new ProviderRequestNotFoundError(ex);
-			// case 429: //Too Many Requests
+			case 410: // Gone
+				throw new ProviderRequestGoneError(ex);
+			case 422: // Unprocessable Entity
+				throw new ProviderRequestUnprocessableEntityError(ex);
 			case 401: // Unauthorized
 				throw new AuthenticationError(provider.id, AuthenticationErrorReason.Unauthorized, ex);
+			case 429: //Too Many Requests
+				throw this.buildProviderRequestRateLimitError(provider, ex);
 			case 403: // Forbidden
 				if (ex.message.includes('rate limit')) {
-					let resetAt: number | undefined;
-
-					const reset = ex.response?.headers?.['x-ratelimit-reset'];
-					if (reset != null) {
-						resetAt = parseInt(reset, 10);
-						if (Number.isNaN(resetAt)) {
-							resetAt = undefined;
-						}
-					}
-
-					throw new ProviderRequestRateLimitError(ex, provider.token, resetAt);
+					throw this.buildProviderRequestRateLimitError(provider, ex);
 				}
 				throw new AuthenticationError('gitkraken', AuthenticationErrorReason.Forbidden, ex);
 			case 500: // Internal Server Error

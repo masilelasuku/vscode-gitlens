@@ -226,6 +226,22 @@ export class ProviderRequestNotFoundError extends Error {
 	}
 }
 
+export class ProviderRequestGoneError extends Error {
+	constructor(public readonly original: Error) {
+		super(original.message);
+
+		Error.captureStackTrace?.(this, ProviderRequestGoneError);
+	}
+}
+
+export class ProviderRequestUnprocessableEntityError extends Error {
+	constructor(public readonly original: Error) {
+		super(original.message);
+
+		Error.captureStackTrace?.(this, ProviderRequestUnprocessableEntityError);
+	}
+}
+
 export class ProviderRequestRateLimitError extends Error {
 	constructor(
 		public readonly original: Error,
